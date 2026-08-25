@@ -233,7 +233,7 @@
   <script>
     const API_URL = 'https://script.google.com/macros/s/AKfycby-t__7U1IJMhRn19dOgAeZhbk7JXt99K22xFxaAXjBleNF-6-UxcCDwIhejZl9oesebA/exec';
 
-    let apiData = [];
+    let apiData = { production: [], bom: [] };
     let ignoredBoms = new Set();
     let correctedBoms = new Map();
     const issuedByInput = document.getElementById('issuedBy');
@@ -299,7 +299,7 @@
       const hasIssuedBy = issuedByInput.value.trim() !== '';
       const hasDate = deliveryDateInput.value !== '';
       const hasFile = fileInput.files.length > 0;
-      processBtn.disabled = !(hasIssuedBy && hasDate && hasFile && apiData.length > 0);
+      processBtn.disabled = !(hasIssuedBy && hasDate && hasFile && apiData.production && apiData.production.length > 0);
     }
 
     [issuedByInput, deliveryDateInput].forEach(el => el.addEventListener('input', checkFormValidity));
@@ -441,7 +441,7 @@
             if (ignoredBoms.has(bomNameLower)) {
               continue;
             }
-            const match = apiData.find(item => item.Bom && item.Bom.trim().toLowerCase() === bomNameLower);
+            const match = apiData.production.find(item => item.Bom && item.Bom.trim().toLowerCase() === bomNameLower);
             if (!match) {
               showStatus(`BOM "${row.bom}" not found in master data.`, 'error');
 
@@ -455,7 +455,7 @@
               // Find suggestions
               const suggestions = [];
               const queryClean = bomNameLower.replace(/\s+/g, '');
-              for (const item of apiData) {
+              for (const item of apiData.production) {
                 if (!item.Bom) continue;
                 const itemBom = item.Bom.trim();
                 const itemBomLower = itemBom.toLowerCase();
@@ -532,12 +532,13 @@
 
           const setEntryData = [];
           const prodEntryData = [];
+          const gheeConsumptionData = [];
 
           const rowsToProcess = uploadedRows.filter(row => !ignoredBoms.has(row.bom.toLowerCase()));
 
           rowsToProcess.forEach(row => {
             // Compare to Master API Data (guaranteed to match here)
-            const match = apiData.find(item => item.Bom && item.Bom.trim().toLowerCase() === row.bom.toLowerCase());
+            const match = apiData.production.find(item => item.Bom && item.Bom.trim().toLowerCase() === row.bom.toLowerCase());
             const setName = match ? (match.Set || '') : '';
 
             // Set Entry Columns
@@ -558,7 +559,47 @@
               'End Time': match ? (match.EndTime || '') : '',
               'Target Set': row.qty
             });
+
+            // Calculate Ghee Consumption
+            if (apiData.bom && Array.isArray(apiData.bom)) {
+              const bomName = row.bom.trim().toLowerCase();
+              const gheeItems = apiData.bom.filter(b => 
+                b.Master && 
+                b.Master.trim().toLowerCase() === bomName && 
+                b['Input Product'] && 
+                b['Input Product'].trim().toUpperCase() === 'GHEE TIN 15KG'
+              );
+
+              if (gheeItems.length > 0) {
+                const totalGheeInputQty = gheeItems.reduce((sum, item) => sum + Number(item['Input Quantity'] || 0), 0);
+                const gheeQty = row.qty * totalGheeInputQty;
+                if (gheeQty > 0) {
+                  gheeConsumptionData.push({
+                    'Date': deliveryDateFormatted,
+                    'Master': match ? (match.Master || '') : '',
+                    'Ghee Qty': gheeQty
+                  });
+                }
+              }
+            }
           });
+
+          // Group Ghee Consumption by Master and sum Ghee Qty
+          const aggregatedGheeMap = new Map();
+          gheeConsumptionData.forEach(item => {
+            const key = item.Master.trim().toLowerCase();
+            if (aggregatedGheeMap.has(key)) {
+              const existing = aggregatedGheeMap.get(key);
+              existing['Ghee Qty'] = Number((existing['Ghee Qty'] + item['Ghee Qty']).toFixed(4));
+            } else {
+              aggregatedGheeMap.set(key, {
+                'Date': item.Date,
+                'Master': item.Master,
+                'Ghee Qty': item['Ghee Qty']
+              });
+            }
+          });
+          const finalGheeConsumptionData = Array.from(aggregatedGheeMap.values());
 
           // Generate File 1: Set Entry
           const ws1 = XLSX.utils.json_to_sheet(setEntryData);
@@ -571,6 +612,12 @@
           const wb2 = XLSX.utils.book_new();
           XLSX.utils.book_append_sheet(wb2, ws2, "Production Entry");
           XLSX.writeFile(wb2, `${todayDate} Production Entry.xlsx`);
+
+          // Generate File 3: Ghee Consumption
+          const ws3 = XLSX.utils.json_to_sheet(finalGheeConsumptionData.length > 0 ? finalGheeConsumptionData : [{'Date': 'No Ghee Consumption', 'Master': '', 'Ghee Qty': ''}]);
+          const wb3 = XLSX.utils.book_new();
+          XLSX.utils.book_append_sheet(wb3, ws3, "Ghee Consumption");
+          XLSX.writeFile(wb3, `${todayDate} Ghee Consumption.xlsx`);
 
           showStatus('Files generated and downloaded successfully!', 'success');
         } catch (err) {
